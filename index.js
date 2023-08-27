@@ -2,6 +2,11 @@ const express = require("express");
 const app = express();
 const mysql = require("mysql2");
 const jwt = require("jsonwebtoken");
+const xlsx = require("xlsx");
+const fs = require("fs");
+const multer = require("multer");
+const swaggerUi = require('swagger-ui-express');
+const specs = require('swagger-jsdoc'); // Path to your swagger configuration file
 
 require("dotenv").config();
 
@@ -26,9 +31,11 @@ function verifyToken(req, res, next) {
       return res.status(403).json({ message: "Token verification failed" });
     }
 
+    console.log(decoded);
     const { role } = decoded;
-    if (role !== 1)
-      return res.status(403).json({ message: "Token verification failed" });
+    if (role !== "1") {
+      return res.status(403);
+    }
 
     req.user = decoded;
     next();
@@ -45,30 +52,38 @@ connection.connect((err) => {
 
 app.use(express.json());
 
+
+// Set up the multer middleware for handling file uploads
+const storage = multer.memoryStorage();
+const upload = multer({ storage });
+
+app.use('/api-docs', swaggerUi.serve, swaggerUi.setup(specs));
+
 app.get("/", (req, res) => {
   res.send("Hello, Express!");
 });
 
 // GET request to retrieve all items
 app.get("/api/employees", (req, res) => {
-  const query = "SELECT * FROM employees";
+  const { name } = req.query;
 
-  connection.query(query, (err, results) => {
+  let query = "SELECT * FROM employees";
+  let values = [];
+
+  if (name) {
+    query = `
+    SELECT * FROM employees
+    WHERE first_name LIKE ? OR last_name LIKE ?
+  `;
+    values = [`%${name}%`, `%${name}%`];
+  }
+
+  connection.query(query, values, (err, results) => {
     if (err) {
-      return res.status(500).json({ error: "Error retrieving employees" });
+      return res.status(500).json({ error: "Error retrieving employee data" });
     }
     res.json(results);
   });
-});
-
-// GET request to retrieve a specific item
-app.get("/api/items/:id", (req, res) => {
-  const itemId = req.params.id;
-  // Logic to retrieve the specific item by itemId
-  const item = {
-    /* ... */
-  };
-  res.json(item);
 });
 
 // Define a route to insert employee data
@@ -124,6 +139,58 @@ app.delete("/api/employees/:id", verifyToken, (req, res) => {
     res.json({ message: "Employee data deleted successfully" });
   });
 });
+
+app.post(
+  "/api/import-employees-excel",
+  verifyToken,
+  upload.single("excelFile"),
+  (req, res) => {
+    if (!req.file) {
+      return res.status(400).json({ error: "No file uploaded" });
+    }
+
+    const workbook = xlsx.read(req.file.buffer);
+    const sheetName = workbook.SheetNames[0];
+    const worksheet = workbook.Sheets[sheetName];
+
+    const rows = xlsx.utils.sheet_to_json(worksheet, { header: 1 });
+
+    // Assuming the first row contains headers
+    const headers = rows[0];
+    const employees = [];
+
+    for (let i = 1; i < rows.length; i++) {
+      const employee = {};
+      for (let j = 0; j < headers.length; j++) {
+        employee[headers[j]] = rows[i][j];
+      }
+      employees.push(employee);
+    }
+
+    const insertQuery = `
+      INSERT INTO employees (first_name, last_name, email, role, hire_date, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?, NOW(), NOW())
+    `;
+
+    employees.forEach((employee) => {
+      const values = [
+        employee.first_name,
+        employee.last_name,
+        employee.email,
+        employee.role,
+        employee.hire_date,
+      ];
+
+      connection.query(insertQuery, values, (err) => {
+        if (err) {
+          console.error("Error inserting employee:", err);
+        }
+      });
+    });
+
+    res.json({ message: "Employees imported successfully" });
+  }
+);
 
 // Generate a JWT
 app.get("/api/token/generator", (req, res) => {
